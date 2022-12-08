@@ -33,6 +33,19 @@ class Position(object):
         self.x = x
         self.y = y
 
+    def __eq__(self, other):
+
+        isPosition = isinstance(other, self.__class__)
+
+        if not isPosition:
+            return False
+        else:
+            return self.x == other.x and self.y == other.y
+
+    def __hash__(self):
+        t = (self.x, self.y)
+        return hash(t)
+
     def distance(self, position) -> int:
         return np.abs(self.x - position.x) + np.abs(self.y - position.y)
 
@@ -47,13 +60,16 @@ class Position(object):
         
         return False
 
-    def viewable(self, position, sight, ignoreDiagonal=False):
+    def viewable(self, position, sight) -> bool:
         """
-        Return true if position is viewable from this point given sight and diagonal.
+        Return true if position is viewable from this point given sight.
         """
+        return np.abs(self.x - position.x) <= sight and np.abs(self.y - position.y) <= sight
 
-
-        return False
+    def relative(self, other) -> tuple:
+        x = other.x - self.x
+        y = other.y - self.y
+        return (x, y)
 
 class Target:
     def __init__(self, position: Position):
@@ -122,8 +138,9 @@ class MulticaptureEnv(Env):
         self.logger = logging.getLogger(__name__)
         self.seed()
         self.players = [Player() for _ in range(players)]
+        self.targets = []
 
-        self.field = np.zeros(field_size, np.int32)
+        self.field_size = field_size
 
         self.penalty = penalty
         self.step_penalty = step_penalty
@@ -150,6 +167,8 @@ class MulticaptureEnv(Env):
 
         self.n_agents = len(self.players)
 
+        self.init_layers()
+
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
         return [seed]
@@ -159,46 +178,30 @@ class MulticaptureEnv(Env):
         - all of the board (board_size^2) with foods
         - player description (x, y, level)*player_count
         """
-        if not self._grid_observation:
-            field_x = self.field.shape[1]
-            field_y = self.field.shape[0]
+        # grid observation space
+        grid_shape = (1 + 2 * self.sight, 1 + 2 * self.sight)
 
-            num_targets = self.num_targets
+        # agents layer:
+        agents_min = np.zeros(grid_shape, dtype=np.float32)
+        agents_max = np.ones(grid_shape, dtype=np.float32)
 
-            min_obs = [-1, -1] * num_targets + [-1, -1] * len(self.players)
-            max_obs = [field_x-1, field_y-1] * num_targets + [
-                field_x-1,
-                field_y-1,
-            ] * len(self.players)
-        else:
-            # grid observation space
-            grid_shape = (1 + 2 * self.sight, 1 + 2 * self.sight)
+        # target layer:
+        targets_min = np.zeros(grid_shape, dtype=np.float32)
+        targets_max = np.ones(grid_shape, dtype=np.float32)
 
-            # agents layer:
-            agents_min = np.zeros(grid_shape, dtype=np.float32)
-            agents_max = np.ones(grid_shape, dtype=np.float32)
+        # access layer: i the cell available
+        access_min = np.zeros(grid_shape, dtype=np.float32)
+        access_max = np.ones(grid_shape, dtype=np.float32)
 
-            # target layer:
-            targets_min = np.zeros(grid_shape, dtype=np.float32)
-            targets_max = np.ones(grid_shape, dtype=np.float32)
-
-            # access layer: i the cell available
-            access_min = np.zeros(grid_shape, dtype=np.float32)
-            access_max = np.ones(grid_shape, dtype=np.float32)
-
-            # total layer
-            min_obs = np.stack([agents_min, targets_min, access_min])
-            max_obs = np.stack([agents_max, targets_max, access_max])
+        # total layer
+        min_obs = np.stack([agents_min, targets_min, access_min])
+        max_obs = np.stack([agents_max, targets_max, access_max])
 
         return gym.spaces.Box(np.array(min_obs), np.array(max_obs), dtype=np.float32)
 
     @property
     def n_agent(self):
         return self.n_agents
-
-    @property
-    def field_size(self):
-        return self.field.shape
 
     @property
     def rows(self):
@@ -224,12 +227,10 @@ class MulticaptureEnv(Env):
 
         for player in self.players:
             for target in targets:
-                x, y = target.position
-
                 if not target.active:
                     toReturn.append(0)
                 else:
-                    toReturn.append((np.abs(x - player.position[0]) + np.abs(y - player.position[1])) / np.sum(self.field_size))
+                    toReturn.append(player.position.distance(target.position))
 
         return np.array(toReturn)
 
@@ -241,48 +242,23 @@ class MulticaptureEnv(Env):
             for player in self.players
         }
 
-    def neighborhood(self, row, col, distance=1, ignore_diag=False):
-        if not ignore_diag:
-            return self.field[
-                max(row - distance, 0) : min(row + distance + 1, self.rows),
-                max(col - distance, 0) : min(col + distance + 1, self.cols),
-            ]
+    def adjacent_target(self, p: Position):
+        number = 0
+        positions = []
 
-        return (
-            self.field[
-                max(row - distance, 0) : min(row + distance + 1, self.rows), col
-            ].sum()
-            + self.field[
-                row, max(col - distance, 0) : min(col + distance + 1, self.cols)
-            ].sum()
-        )
-
-    def adjacent_target(self, row, col):
-        return (
-            self.field[max(row - 1, 0), col]
-            + self.field[min(row + 1, self.rows - 1), col]
-            + self.field[row, max(col - 1, 0)]
-            + self.field[row, min(col + 1, self.cols - 1)]
-        )
-
-    def adjacent_target_location(self, row, col):
-        if row > 1 and self.field[row - 1, col] > 0:
-            return row - 1, col
-        elif row < self.rows - 1 and self.field[row + 1, col] > 0:
-            return row + 1, col
-        elif col > 1 and self.field[row, col - 1] > 0:
-            return row, col - 1
-        elif col < self.cols - 1 and self.field[row, col + 1] > 0:
-            return row, col + 1
+        for target in self._targets:
+            if target.active and p.isAdjacent(target.position):
+                number += 1
+                positions.append((target.position.x, target.position.y))
+        
+        return number, positions
 
     def adjacent_players(self, row, col):
+        p = Position(row, col)
         return [
             player
             for player in self.players
-            if abs(player.position[0] - row) == 1
-            and player.position[1] == col
-            or abs(player.position[1] - col) == 1
-            and player.position[0] == row
+            if p.isAdjacent(player.position)
         ]
 
     def spawn_targets(self, num_targets):
@@ -293,24 +269,27 @@ class MulticaptureEnv(Env):
             attempts += 1
             row = self.np_random.integers(1, self.rows - 1)
             col = self.np_random.integers(1, self.cols - 1)
+            p = Position(row, col)
 
             # check if it has neighbors:
-            if (
-                self.neighborhood(row, col).sum() > 0
-                or self.neighborhood(row, col, distance=2, ignore_diag=True) > 0
-                or not self._is_empty_location(row, col)
-            ):
+            skip = False
+            for target in self._targets:
+                if p.distance(target.position) < 3:
+                    skip = True
+            
+            if skip:
                 continue
 
-            self.field[row, col] = 1
             target_count += 1
-            self._targets.append(Target((row, col)))
+            self._targets.append(Target(p))
 
     def _is_empty_location(self, row, col):
-        if self.field[row, col] != 0:
-            return False
+        p = Position(row, col)
+        for target in self._targets:
+            if target.position == p:
+                return False
         for a in self.players:
-            if a.position and row == a.position[0] and col == a.position[1]:
+            if a.position == p:
                 return False
         return True
 
@@ -326,7 +305,7 @@ class MulticaptureEnv(Env):
                 col = self.np_random.integers(0, self.cols)
                 if self._is_empty_location(row, col):
                     player.setup(
-                        (row, col),
+                        Position(row, col),
                         self.field_size,
                         i
                     )
@@ -335,30 +314,36 @@ class MulticaptureEnv(Env):
                 attempts += 1
 
     def _is_valid_action(self, player, action):
+        p = player.position
         if action == Action.NONE:
             return True
         elif action == Action.NORTH:
             return (
-                player.position[0] > 0
-                and self.field[player.position[0] - 1, player.position[1]] == 0
+                player.position.x > 0
+                and self.target_layer[p.x + self.sight - 1, p.y + self.sight] == 0
+                and self.player_layer[p.x + self.sight - 1, p.y + self.sight] == 0
             )
         elif action == Action.SOUTH:
             return (
-                player.position[0] < self.rows - 1
-                and self.field[player.position[0] + 1, player.position[1]] == 0
+                player.position.x < self.rows - 1
+                and self.target_layer[p.x + self.sight + 1, p.y + self.sight] == 0
+                and self.player_layer[p.x + self.sight + 1, p.y + self.sight] == 0
             )
         elif action == Action.WEST:
             return (
-                player.position[1] > 0
-                and self.field[player.position[0], player.position[1] - 1] == 0
+                player.position.y > 0
+                and self.target_layer[p.x + self.sight, p.y + self.sight - 1] == 0
+                and self.player_layer[p.x + self.sight, p.y + self.sight - 1] == 0
             )
         elif action == Action.EAST:
             return (
-                player.position[1] < self.cols - 1
-                and self.field[player.position[0], player.position[1] + 1] == 0
+                player.position.y < self.cols - 1
+                and self.target_layer[p.x + self.sight, p.y + self.sight + 1] == 0
+                and self.player_layer[p.x + self.sight, p.y + self.sight + 1] == 0
             )
         elif action == Action.LOAD:
-            return self.adjacent_target(*player.position) > 0
+            n, _ = self.adjacent_target(player.position)
+            return n > 0
 
         self.logger.error("Undefined action {} from {}".format(action, player.name))
         raise ValueError("Undefined action")
@@ -408,99 +393,81 @@ class MulticaptureEnv(Env):
         )
 
     def _make_gym_obs(self):
-        def make_obs_array(observation):
-            obs = np.zeros(self.observation_space[0].shape, dtype=np.float32)
-            # obs[: observation.field.size] = observation.field.flatten()
-            # self player is always first
-            seen_players = [p for p in observation.players if p.is_self] + [
-                p for p in observation.players if not p.is_self
-            ]
 
-            for i in range(self.num_targets):
-                obs[2 * i] = -1
-                obs[2 * i + 1] = -1
+        def _player_obs(player, target_layer, player_layer, bounds_layer):
+            p = player.position
 
-            for i, (y, x) in enumerate(zip(*np.nonzero(observation.field))):
-                obs[2 * i] = y
-                obs[2 * i + 1] = x
+            left = p.x 
+            right = p.x + self.sight*2
 
-            for i in range(len(self.players)):
-                obs[self.num_targets * 2 + 2 * i] = -1
-                obs[self.num_targets * 2 + 2 * i + 1] = -1
+            below = p.y
+            above = p.y + self.sight*2
 
-            for i, p in enumerate(seen_players):
-                obs[self.num_targets * 2 + 2 * i] = p.position[0]
-                obs[self.num_targets * 2 + 2 * i + 1] = p.position[1]
+            tg = target_layer[left:right+1, below:above+1]
+            pl = player_layer[left:right+1, below:above+1]
+            bd = bounds_layer[left:right+1, below:above+1]
 
-            return obs
-
-        def make_global_grid_arrays():
-            """
-            Create global arrays for grid observation space
-            """
-            grid_shape_x, grid_shape_y = self.field_size
-            grid_shape_x += 2 * self.sight
-            grid_shape_y += 2 * self.sight
-            grid_shape = (grid_shape_x, grid_shape_y)
-
-            agents_layer = np.zeros(grid_shape, dtype=np.float32)
-            for player in self.players:
-                player_x, player_y = player.position
-                agents_layer[player_x + self.sight, player_y + self.sight] = 1
+            return np.stack((tg, pl, bd),axis=0)
+        
+        # Add players to grid
+        for player in self.players:
+            p = player.position
+            self.player_layer[p.x + self.sight, p.y + self.sight] = 1
             
-            targets_layer = np.zeros(grid_shape, dtype=np.float32)
-            targets_layer[self.sight:-self.sight, self.sight:-self.sight] = self.field.copy()
-
-            access_layer = np.ones(grid_shape, dtype=np.float32)
-            # out of bounds not accessible
-            access_layer[:self.sight, :] = 0.0
-            access_layer[-self.sight:, :] = 0.0
-            access_layer[:, :self.sight] = 0.0
-            access_layer[:, -self.sight:] = 0.0
-            # agent locations are not accessible
-            for player in self.players:
-                player_x, player_y = player.position
-                access_layer[player_x + self.sight, player_y + self.sight] = 0.0
-            # food locations are not accessible
-            foods_x, foods_y = self.field.nonzero()
-            for x, y in zip(foods_x, foods_y):
-                access_layer[x + self.sight, y + self.sight] = 0.0
-            
-            return np.stack([agents_layer, targets_layer, access_layer])
-
-        def get_agent_grid_bounds(agent_x, agent_y):
-            return agent_x, agent_x + 2 * self.sight + 1, agent_y, agent_y + 2 * self.sight + 1
+        for target in self._targets:
+            if target.active:
+                p = target.position
+                self.target_layer[p.x + self.sight, p.y + self.sight] = 1
         
-        def get_player_reward(observation):
-            for p in observation.players:
-                if p.is_self:
-                    return p.reward
-
-        observations = [self._make_obs(player) for player in self.players]
-        if self._grid_observation:
-            layers = make_global_grid_arrays()
-            agents_bounds = [get_agent_grid_bounds(*player.position) for player in self.players]
-            nobs = tuple([layers[:, start_x:end_x, start_y:end_y] for start_x, end_x, start_y, end_y in agents_bounds])
-        else:
-            nobs = tuple([make_obs_array(obs) for obs in observations])
-        nreward = [get_player_reward(obs) for obs in observations]
-        ndone = [obs.game_over for obs in observations]
-        # ninfo = [{'observation': obs} for obs in observations]
-        ninfo = {}
+        nobs = [_player_obs(player, self.target_layer, self.player_layer, self.bounds_layer).flatten() for player in self.players]
+        rewards = [player.reward for player in self.players]
         
-        # check the space of obs
-        for i, obs in  enumerate(nobs):
-            assert self.observation_space[i].contains(obs), \
-                f"obs space error: obs: {obs}, obs_space: {self.observation_space[i]}"
-        
-        return nobs, nreward, any(ndone), ninfo
+        return nobs, rewards, self._game_over, {}
 
+    def init_layers(self):
+        plus_size = (self.field_size[0]+self.sight*2, self.field_size[1]+self.sight*2)
+        self.target_layer = np.zeros(plus_size, np.int32)
+        self.player_layer = np.zeros(plus_size, np.int32)
+        self.bounds_layer = np.ones(plus_size, np.int32)
+        self.bounds_layer[self.sight:self.sight+self.field_size[0], self.sight:self.sight+self.field_size[1]] = np.zeros(self.field_size, np.int32)
+    
+    def update_player_layer(self):
+        plus_size = (self.field_size[0]+self.sight*2, self.field_size[1]+self.sight*2)
+        self.player_layer = np.zeros(plus_size, np.int32)
+
+        for player in self.players:
+            p = player.position
+            self.player_layer[p.x + self.sight, p.y + self.sight] = 1
+
+    def update_target_layer(self):
+        for target in self._targets:
+            p = target.position
+            if target.active:
+                self.target_layer[p.x + self.sight, p.y + self.sight] = 1
+            else:
+                self.target_layer[p.x + self.sight, p.y + self.sight] = 0
+
+    def update_position(self, player, new_position):
+        """
+        update players position and player_layer with new (x, y) pair
+        """
+        p = player.position
+        x, y = new_position
+        self.player_layer[p.x + self.sight, p.y + self.sight] = 0
+        p.x, p.y = x, y
+        self.player_layer[p.x + self.sight, p.y + self.sight] = 1
+
+    
     def reset(self):
-        self.field = np.zeros(self.field_size, np.int32)
+        self.init_layers()
+        
         self.spawn_players()
+        self.update_player_layer()
+        
 
         self._targets = []
         self.spawn_targets(self.num_targets)
+        self.update_target_layer()
         self.current_step = 0
         self._game_over = False
         self._gen_valid_moves()
@@ -540,17 +507,17 @@ class MulticaptureEnv(Env):
         # so check for collisions
         for player, action in zip(self.players, actions):
             if action == Action.NONE:
-                collisions[player.position].append(player)
+                collisions[(player.position.x, player.position.y)].append(player)
             elif action == Action.NORTH:
-                collisions[(player.position[0] - 1, player.position[1])].append(player)
+                collisions[(player.position.x - 1, player.position.y)].append(player)
             elif action == Action.SOUTH:
-                collisions[(player.position[0] + 1, player.position[1])].append(player)
+                collisions[(player.position.x + 1, player.position.y)].append(player)
             elif action == Action.WEST:
-                collisions[(player.position[0], player.position[1] - 1)].append(player)
+                collisions[(player.position.x, player.position.y - 1)].append(player)
             elif action == Action.EAST:
-                collisions[(player.position[0], player.position[1] + 1)].append(player)
+                collisions[(player.position.x, player.position.y + 1)].append(player)
             elif action == Action.LOAD:
-                collisions[player.position].append(player)
+                collisions[(player.position.x, player.position.y)].append(player)
                 loading_players.add(player)
 
         # and do movements for non colliding players
@@ -558,14 +525,16 @@ class MulticaptureEnv(Env):
         for k, v in collisions.items():
             if len(v) > 1:  # make sure no more than an player will arrive at location
                 continue
-            v[0].position = k
+            
+            self.update_position(v[0], k)
 
         # finally process the loadings:
         while loading_players:
             # find adjacent food
             player = loading_players.pop()
-            if self.adjacent_target(*player.position) > 0:
-                frow, fcol = self.adjacent_target_location(*player.position)
+            n, locs = self.adjacent_target(player.position)
+            if  n > 0:
+                frow, fcol = locs[0]
 
                 adj_players = self.adjacent_players(frow, fcol)
                 adj_players = [
@@ -585,24 +554,16 @@ class MulticaptureEnv(Env):
                     a.reward += self.target_reward
                     
                 # and the food is removed
-                self.field[frow, fcol] = 0
+                self.target_layer[frow + self.sight, fcol + self.sight] = 0
                 for target in self._targets:
-                    if (frow, fcol) == target.position:
+                    if Position(frow, fcol) == target.position:
                         target.capture()
-
-                ## Add a new food somewhere else on the map
-                """
-                player_levels = sorted([player.level for player in self.players])
-                self.spawn_food(
-                    1, max_level=sum(player_levels[:3])
-                )
-                """
 
             else:
                 player.reward -= self.penalty
 
         self._game_over = (
-            self.field.sum() == 0 or self._max_episode_steps <= self.current_step
+            (not any([target.active for target in self._targets])) or self._max_episode_steps <= self.current_step
         )
         self._gen_valid_moves()
 

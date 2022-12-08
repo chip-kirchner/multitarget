@@ -119,7 +119,7 @@ class Viewer(object):
         self.window.dispatch_events()
 
         self._draw_grid()
-        self._draw_food(env)
+        self._draw_target(env)
         self._draw_players(env)
 
         if return_rgb_array:
@@ -170,23 +170,23 @@ class Viewer(object):
             )
         batch.draw()
 
-    def _draw_food(self, env):
-        idxes = list(zip(*env.field.nonzero()))
-        apples = []
+    def _draw_target(self, env):
+        targets = []
         batch = pyglet.graphics.Batch()
 
-        # print(env.field)
-        for row, col in idxes:
-            apples.append(
-                pyglet.sprite.Sprite(
-                    self.img_apple,
-                    (self.grid_size + 1) * col,
-                    self.height - (self.grid_size + 1) * (row + 1),
-                    batch=batch,
+        for target in env._targets:
+            if target.active:
+                row, col = target.position.x, target.position.y
+                targets.append(
+                    pyglet.sprite.Sprite(
+                        self.img_apple,
+                        (self.grid_size + 1) * col,
+                        self.height - (self.grid_size + 1) * (row + 1),
+                        batch=batch,
+                    )
                 )
-            )
-        for a in apples:
-            a.update(scale=self.grid_size / a.width)
+        for t in targets:
+            t.update(scale=self.grid_size / t.width)
         batch.draw()
 
     def _draw_players(self, env):
@@ -194,7 +194,7 @@ class Viewer(object):
         batch = pyglet.graphics.Batch()
 
         for player in env.players:
-            row, col = player.position
+            row, col = player.position.x, player.position.y
             players.append(
                 pyglet.sprite.Sprite(
                     self.img_agent,
@@ -207,9 +207,10 @@ class Viewer(object):
             p.update(scale=self.grid_size / p.width)
         batch.draw()
         for p in env.players:
-            self._draw_badge(*p.position, p.id)
+            self._draw_badge(p.position, p.id)
 
-    def _draw_badge(self, row, col, level):
+    def _draw_badge(self, position, level):
+        row, col = position.x, position.y
         resolution = 6
         radius = self.grid_size / 5
 
