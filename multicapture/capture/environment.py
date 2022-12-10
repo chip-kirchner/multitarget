@@ -72,12 +72,17 @@ class Position(object):
         return (x, y)
 
 class Target:
-    def __init__(self, position: Position):
+    def __init__(self, position: Position, max_capacity):
         self.position = position
         self.active = True
+        self.max_capacity = max_capacity
+        self.capacity = max_capacity
 
     def capture(self):
-        self.active = False
+        if self.capacity >= self.max_capacity:
+            self.active = False
+        else:
+            self.capacity += 1
 
 
 class Player:
@@ -147,7 +152,7 @@ class MulticaptureEnv(Env):
         
         self.num_targets = num_targets
         self._targets = []
-        self.target_capacity = target_capacity
+        self.target_capacity = min(target_capacity, players)
         self.target_reward = target_reward
 
         self.sight = sight
@@ -178,24 +183,21 @@ class MulticaptureEnv(Env):
         - all of the board (board_size^2) with foods
         - player description (x, y, level)*player_count
         """
+
         # grid observation space
         grid_shape = (1 + 2 * self.sight, 1 + 2 * self.sight)
 
-        # agents layer:
+        # agents layer: agent levels
         agents_min = np.zeros(grid_shape, dtype=np.float32)
         agents_max = np.ones(grid_shape, dtype=np.float32)
 
-        # target layer:
-        targets_min = np.zeros(grid_shape, dtype=np.float32)
-        targets_max = np.ones(grid_shape, dtype=np.float32)
-
-        # access layer: i the cell available
-        access_min = np.zeros(grid_shape, dtype=np.float32)
-        access_max = np.ones(grid_shape, dtype=np.float32)
+        # foods layer: foods level
+        foods_min = np.zeros(grid_shape, dtype=np.float32)
+        foods_max = np.ones(grid_shape, dtype=np.float32)
 
         # total layer
-        min_obs = np.stack([agents_min, targets_min, access_min])
-        max_obs = np.stack([agents_max, targets_max, access_max])
+        min_obs = np.stack([agents_min, foods_min]).flatten()
+        max_obs = np.stack([agents_max, foods_max]).flatten()
 
         return gym.spaces.Box(np.array(min_obs), np.array(max_obs), dtype=np.float32)
 
@@ -249,7 +251,7 @@ class MulticaptureEnv(Env):
         for target in self._targets:
             if target.active and p.isAdjacent(target.position):
                 number += 1
-                positions.append((target.position.x, target.position.y))
+                positions.append(target)
         
         return number, positions
 
@@ -281,7 +283,7 @@ class MulticaptureEnv(Env):
                 continue
 
             target_count += 1
-            self._targets.append(Target(p))
+            self._targets.append(Target(p, self.target_capacity))
 
     def _is_empty_location(self, row, col):
         p = Position(row, col)
@@ -407,7 +409,7 @@ class MulticaptureEnv(Env):
             pl = player_layer[left:right+1, below:above+1]
             bd = bounds_layer[left:right+1, below:above+1]
 
-            return np.stack((tg, pl, bd),axis=0)
+            return np.stack((tg, pl),axis=0)
         
         # Add players to grid
         for player in self.players:
@@ -419,8 +421,8 @@ class MulticaptureEnv(Env):
                 p = target.position
                 self.target_layer[p.x + self.sight, p.y + self.sight] = 1
         
-        nobs = [_player_obs(player, self.target_layer, self.player_layer, self.bounds_layer).flatten() for player in self.players]
-        rewards = [player.reward for player in self.players]
+        nobs = tuple([_player_obs(player, self.target_layer, self.player_layer, self.bounds_layer).flatten() for player in self.players])
+        rewards = tuple([player.reward for player in self.players])
         
         return nobs, rewards, self._game_over, {}
 
@@ -495,7 +497,6 @@ class MulticaptureEnv(Env):
                         player.name, player.position, action
                     )
                 )
-                print("here")
                 actions[i] = Action.NONE
 
         loading_players = set()
@@ -532,9 +533,10 @@ class MulticaptureEnv(Env):
         while loading_players:
             # find adjacent food
             player = loading_players.pop()
-            n, locs = self.adjacent_target(player.position)
+            n, tars = self.adjacent_target(player.position)
             if  n > 0:
-                frow, fcol = locs[0]
+                t = tars[0]
+                frow, fcol = t.position.x, t.position.y
 
                 adj_players = self.adjacent_players(frow, fcol)
                 adj_players = [
@@ -543,7 +545,7 @@ class MulticaptureEnv(Env):
 
                 loading_players = loading_players - set(adj_players)
             
-                if len(adj_players) < self.target_capacity:
+                if len(adj_players) < t.capacity:
                     # failed to load
                     for a in adj_players:
                         a.reward -= self.penalty
