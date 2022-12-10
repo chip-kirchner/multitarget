@@ -152,7 +152,7 @@ class MulticaptureEnv(Env):
         
         self.num_targets = num_targets
         self._targets = []
-        self.target_capacity = min(target_capacity, players)
+        self.target_capacity = players
         self.target_reward = target_reward
 
         self.sight = sight
